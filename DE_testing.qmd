@@ -1,0 +1,279 @@
+---
+title: "EdgeR, DeSeq2 testing"
+format: html
+editor: visual
+---
+
+```{r}
+#### Loading packages
+suppressPackageStartupMessages({
+  library(SingleCellExperiment)
+  library(scRNAseq)
+  library(zellkonverter)
+  library(sets)
+  library(mclust)
+})
+```
+
+```{r}
+### Define helpers to get plot: ARI vs Jaccard
+
+### Function: compute ARI
+compute_ari <- function(sce1, sce2, clust_method) {
+  # Extract cluster assignments from the two SingleCellExperiment objects
+  cluster_labels_1 <- as.character(colData(sce1)[[clust_method]])
+  cluster_labels_2 <- as.character(colData(sce2)[[clust_method]])
+  
+  # Compute and return the Adjusted Rand Index
+  return(adjustedRandIndex(cluster_labels_1, cluster_labels_2))
+}
+
+  
+jaccard_similarity_list <- function(list1, list2) {
+  # Initialize variables to store intersection and union lengths
+  intersect_lengths <- vector()
+  union_lengths <- vector()
+  
+  # Iterate over the named sets in list1 and list2 and compute Jaccard similarity for each matching set
+  for (cluster_name in intersect(names(list1), names(list2))) {
+    set1 <- list1[[cluster_name]]
+    set2 <- list2[[cluster_name]]
+    intersect_len <- length(intersect(set1, set2))
+    union_len <- length(union(set1, set2))
+    intersect_lengths <- c(intersect_lengths, intersect_len)
+    union_lengths <- c(union_lengths, union_len)
+  }
+  
+  # Compute and return the average Jaccard similarity index across all matching sets
+  return(mean(intersect_lengths / union_lengths))
+}
+
+
+### Function: produce final plot
+plot_ari_jaccard <- function(ari, jaccard, method, xlab = "ARI", ylab = "Jaccard index", clust_label = NULL) {
+
+  # If clust_label is not NULL, update plot title and axis labels
+  if (!is.null(clust_label)) {
+    # Get the name of the current cluster
+    cluster_name <- paste("cluster", clust_label)
+    # Update plot title
+    plot_title <- paste("ARI vs. Jaccard Indices for", cluster_name)
+    # Update y-axis label
+    ylab <- paste(cluster_name, "specific", ylab)
+    # Update x-axis label
+    xlab <- "global ARI"
+  } else {
+    # Use the default plot title and axis labels
+    plot_title <- paste("ARI vs. Jaccard Indices (", method, ")")
+  }
+  
+  # Plot the ARI vs Jaccard Indices and connect points with a blue line
+  plot(ari, jaccard, type = "o", col = "blue", xlab = xlab, ylab = ylab, main = plot_title, grid = TRUE)
+}
+
+```
+
+```{r}
+### Import adata objects with rawcounts from scanpy as sce with zellkonverter
+sce <- readH5AD("../Data/error_adata/raw.h5ad",X_name = "counts")
+
+sce_5 <- readH5AD("../Data/error_adata/raw_5.h5ad",X_name = "counts")
+
+sce_10 <- readH5AD("../Data/error_adata/raw_10.h5ad",X_name = "counts")
+
+sce_15 <- readH5AD("../Data/error_adata/raw_15.h5ad",X_name = "counts")
+
+sce_20 <- readH5AD("../Data/error_adata/raw_20.h5ad",X_name = "counts")
+
+sce_25 <- readH5AD("../Data/error_adata/raw_25.h5ad",X_name = "counts")
+```
+
+```{r}
+# Computing ARI for each error ds with respect to original ds
+ARI_0 <- compute_ari(sce, sce, 'leiden')
+ARI_5 <- compute_ari(sce, sce_5, 'leiden')
+ARI_10 <- compute_ari(sce, sce_10, 'leiden')
+ARI_15 <- compute_ari(sce, sce_15, 'leiden')
+ARI_20 <- compute_ari(sce, sce_20, 'leiden')
+ARI_25 <- compute_ari(sce, sce_25, 'leiden')
+
+ARIs <- c (ARI_0, ARI_5, ARI_10, ARI_15, ARI_20, ARI_25)
+ARIs
+```
+
+EdgeR
+
+```{r}
+library(edgeR)
+```
+
+```{r}
+EdgeR_de_analysis <- function(sce, cluster_method = "leiden", threshold = 0.05, clust_label = NULL) {
+  
+  print('Entered')
+  
+  # Get cluster labels
+  clusters <- unique(sce@colData@listData[[cluster_method]])
+  
+  # Perform differential expression analysis for each cluster
+  de_genes_list <- list() # Initialize list of sets
+  
+  for (cluster in clusters) {
+    # If clust_label is specified, only do DE testing: clust_label vs rest
+    if (!is.null(clust_label)) {
+      if (cluster != clust_label) {
+        next
+      }
+    }
+    
+    cat(paste("performing DE analysis with EdgeR for cluster: ", cluster))
+    # Create a column called 'groupings' with 1 for the current cluster and 0 for all others
+    sce$groupings <- factor(ifelse(sce@colData@listData[[cluster_method]] == cluster, 1, 0), levels = 0:1)
+    
+    ### Perform DE analysis using EdgeR
+    # init DGE list object
+    dge <- DGEList(counts = assays(sce)$counts, group = sce$groupings)
+    
+    # filter lowly expressed genes
+    keep <- filterByExpr(dge)
+    dge <- dge[keep,,keep.lib.sizes=FALSE]
+    
+    print(dim(dge))
+    
+    # Create design matrix
+    design <- model.matrix(~sce$groupings)
+    
+    dge <- calcNormFactors(dge)
+    dge <- estimateDisp(dge, design)
+    
+    # fit LRT (suggested for sc-RNA seq data)
+    fit <- glmFit(dge, design)
+    lrt <- glmLRT(fit, coef = 2)
+    
+    # Identify significantly differentially expressed genes
+    tt <- topTags(lrt, n = length(sce))
+    sig_genes <- rownames(tt$table[tt$table$FDR < threshold, ])
+    de_genes_list[cluster] <- set(sig_genes) # Add set of DE genes to list
+    
+  }
+  
+  return(de_genes_list)
+}
+
+```
+
+```{r}
+EdgeR_sce_DEGs <- EdgeR_de_analysis (sce)
+EdgeR_sce_5_DEGs <- EdgeR_de_analysis (sce_5)
+EdgeR_sce_10_DEGs <- EdgeR_de_analysis (sce_10)
+EdgeR_sce_15_DEGs <- EdgeR_de_analysis (sce_15)
+EdgeR_sce_20_DEGs <- EdgeR_de_analysis (sce_20)
+EdgeR_sce_25_DEGs <- EdgeR_de_analysis (sce_25)
+```
+
+```{r}
+# Computing Jaccard index of DE genes sets
+Jaccard_0 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_DEGs)
+Jaccard_5 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_5_DEGs)
+Jaccard_10 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_10_DEGs)
+Jaccard_15 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_15_DEGs)
+Jaccard_20 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_20_DEGs)
+Jaccard_25 <- jaccard_similarity_list(EdgeR_sce_DEGs, EdgeR_sce_25_DEGs)
+
+Jaccard_idxs <- c(Jaccard_0,Jaccard_5, Jaccard_10, Jaccard_15, Jaccard_20, Jaccard_25)
+```
+
+```{r}
+# Final plot for EdgeR
+plot_ari_jaccard (ARIs, Jaccard_idxs, 'EdgeR', xlab = "ARI", ylab = "Jaccard_index")
+```
+
+DeSeq2
+
+```{r}
+library(DESeq2)
+```
+
+```{r}
+DESeq2_de_analysis <- function(sce, cluster_method = "leiden", threshold = 0.05,clust_label= NULL) {
+  
+  print("entered")
+  
+  # Get cluster labels
+  clusters <- unique(sce@colData@listData[[cluster_method]])
+  
+  # Perform differential expression analysis for each cluster
+  de_genes_list<- list()
+  
+  for (cluster in clusters) {
+    # If clust_label is specified, only do DE testing: clust_label vs rest
+    if (!is.null(clust_label)) {
+      if (cluster != clust_label) {
+        next
+      }
+    }
+    
+    cat(paste("performing DE analysis with DESeq2 for cluster: ", cluster))
+
+    # Create a column called 'groupings' with 1 for the current cluster and 0 for all others
+    sce$groupings <- factor(ifelse(sce@colData@listData[[cluster_method]] == cluster, 1, 0), levels = 0:1)
+    
+    
+    # Apply EdgeR filtering on lowly expressed genes
+    dge <- DGEList(counts = assays(sce)$counts, group=sce$groupings)
+    
+    # filter lowly expressed genes
+    keep <- filterByExpr(dge)
+    dge <- dge[keep,,keep.lib.sizes=FALSE]
+
+    ### Perform DE analysis using DESeq2
+    #Create DESeqDataSet object from filtered dge
+    dds <- DESeqDataSetFromMatrix(countData = as.matrix(dge$counts), colData = dge$samples, design = ~ group)
+
+    # filter lowly expressed genes from raw counts
+    #keep <- rowSums(counts(dds)) >= 1000 # change the threshold as needed
+    #dds <- dds[keep, ]
+
+    # Run DESeq2 analysis
+    dds <- DESeq(dds, test ="LRT", reduced = ~ 1)
+
+    # Get differential expression results
+    res <- results(dds)
+
+    # Identify significantly differentially expressed genes
+    sig_genes <- rownames(res[res$padj < threshold, ])
+    de_genes_list[cluster] <- set(sig_genes) # Add set of DE genes to list
+    
+    print(length(sig_genes))
+  }
+  
+  return(de_genes_list)
+  
+}
+```
+
+```{r}
+DESeq2_sce_DEGs <- DESeq2_de_analysis (sce)
+DESeq2_sce_5_DEGs <- DESeq2_de_analysis (sce_5)
+DESeq2_sce_10_DEGs <- DESeq2_de_analysis (sce_10)
+DESeq2_sce_15_DEGs <- DESeq2_de_analysis (sce_15)
+DESeq2_sce_20_DEGs <- DESeq2_de_analysis (sce_20)
+DESeq2_sce_25_DEGs <- DESeq2_de_analysis (sce_25)
+```
+
+```{r}
+#Computing Jaccard index of DE genes sets
+Jaccard_0 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_DEGs)
+Jaccard_5 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_5_DEGs)
+Jaccard_10 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_10_DEGs)
+Jaccard_15 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_15_DEGs)
+Jaccard_20 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_20_DEGs)
+Jaccard_25 <- jaccard_similarity(DESeq2_sce_DEGs, DESeq2_sce_25_DEGs)
+
+Jaccard_idxs <- c(Jaccard_0,Jaccard_5, Jaccard_10, Jaccard_15, Jaccard_20, Jaccard_25)
+```
+
+```{r}
+# Final plot for Deseq2
+plot_ari_jaccard (ARIs, Jaccard_idxs, 'Deseq2', xlab = "ARI", ylab = "Jaccard_index")
+```
